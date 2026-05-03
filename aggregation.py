@@ -19,6 +19,19 @@ from __future__ import annotations
 
 import torch
 
+# Method 0 compares PCA separation across layers and end-of-sequence token
+# positions. We therefore keep both the penultimate real token (a proxy for the
+# last content token before EOS) and the final real token for every layer.
+TOKEN_SUMMARIES: tuple[str, ...] = ("penultimate_token", "last_token")
+
+
+def _get_real_positions(attention_mask: torch.Tensor) -> torch.Tensor:
+    """Return the indices of non-padding tokens for one sample."""
+    real_positions = attention_mask.nonzero(as_tuple=False).flatten()
+    if real_positions.numel() == 0:
+        raise ValueError("attention_mask contains no non-padding tokens.")
+    return real_positions
+
 
 def aggregate(
     hidden_states: torch.Tensor,
@@ -45,16 +58,14 @@ def aggregate(
     # STUDENT: Replace or extend the aggregation below.
     # ------------------------------------------------------------------
 
-    # Default: last real token of the final transformer layer.
-    layer = hidden_states[-1]          # (seq_len, hidden_dim)
+    real_positions = _get_real_positions(attention_mask)
+    last_pos = int(real_positions[-1].item())
+    penultimate_pos = int(real_positions[-2].item()) if real_positions.numel() > 1 else last_pos
 
-    # Find the index of the last real (non-padding) token.
-    real_positions = attention_mask.nonzero(as_tuple=False)  # (n_real, 1)
-    last_pos = int(real_positions[-1].item())                 # scalar index
+    penultimate_token = hidden_states[:, penultimate_pos, :].reshape(-1)
+    last_token = hidden_states[:, last_pos, :].reshape(-1)
 
-    feature = layer[last_pos]          # (hidden_dim,)
-
-    return feature
+    return torch.cat([penultimate_token, last_token], dim=0)
     # ------------------------------------------------------------------
 
 
@@ -85,8 +96,9 @@ def extract_geometric_features(
     # STUDENT: Replace or extend the geometric feature extraction below.
     # ------------------------------------------------------------------
 
-    # Placeholder: returns an empty tensor (no geometric features).
-    return torch.zeros(0)
+    # Method 0 is purely a PCA-based diagnostic on the token representations
+    # returned by ``aggregate``, so we keep the geometric branch empty.
+    return hidden_states.new_zeros(0)
 
 
 def aggregation_and_feature_extraction(

@@ -9,6 +9,8 @@ predictions.csv
 # Results
 results.json
 *.json
+artifacts/
+*.npz
 
 # HuggingFace model cache
 .cache/
@@ -24,3 +26,7 @@ env/
 # OS files
 .DS_Store
 Thumbs.db
+
+.venv/
+__pycache__/
+*.pyc

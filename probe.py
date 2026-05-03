@@ -1,178 +1,225 @@
 """
 probe.py — Hallucination probe classifier (student-implemented).
 
-Implements ``HallucinationProbe``, a binary MLP that classifies feature
-vectors as truthful (0) or hallucinated (1).  Called from ``solution.py``
-via ``evaluate.run_evaluation``.  All four public methods (``fit``,
-``fit_hyperparameters``, ``predict``, ``predict_proba``) must be implemented
-and their signatures must not change.
+Implements ``HallucinationProbe``, a lightweight classifier that follows
+Method 0 from ``METHODS_DETAILED.md``:
+
+  1. Split the flattened feature vector back into per-layer hidden states for
+     each tracked token position.
+  2. Run a 2-D PCA for every layer-position pair.
+  3. Score the pair with a silhouette score using the training labels.
+  4. Keep the best-separated pairs and train a small linear classifier on the
+     concatenated PCA projections.
+
+The class still exposes the same public API expected by ``evaluate.py``.
 """
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.metrics import f1_score
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import f1_score, silhouette_score
 from sklearn.preprocessing import StandardScaler
+
+from aggregation import TOKEN_SUMMARIES
+
+EXPECTED_HIDDEN_DIM = 896
+EXPECTED_LAYER_OUTPUTS = 25
+PCA_COMPONENTS = 2
+MAX_SELECTED_PAIRS = 4
+RANDOM_STATE = 42
 
 
 class HallucinationProbe(nn.Module):
-    """Binary classifier that detects hallucinations from hidden-state features.
-
-    Extends ``torch.nn.Module``; the default architecture is a single
-    hidden-layer MLP with ``StandardScaler`` pre-processing.  The network is
-    built lazily in ``fit()`` once the feature dimension is known.
-    """
+    """Method-0-inspired binary classifier over hidden-state features."""
 
     def __init__(self) -> None:
         super().__init__()
-        self._net: nn.Sequential | None = None  # built lazily in fit()
-        self._scaler = StandardScaler()
-        self._threshold: float = 0.5  # tuned by fit_hyperparameters()
+        self._classifier: LogisticRegression | None = None
+        self._projection_scaler = StandardScaler()
+        self._selected_pairs: list[dict[str, object]] = []
+        self._threshold: float = 0.5
+        self._core_dim = EXPECTED_HIDDEN_DIM * EXPECTED_LAYER_OUTPUTS * len(TOKEN_SUMMARIES)
 
-    # ------------------------------------------------------------------
-    # STUDENT: Replace or extend the network definition below.
-    # ------------------------------------------------------------------
-    def _build_network(self, input_dim: int) -> None:
-        """Instantiate the network layers.
+        # Exposed for diagnostics / reporting.
+        self.layer_diagnostics_: list[dict[str, float | int | str]] = []
+        self.selected_layer_pairs_: list[dict[str, float | int | str]] = []
 
-        Called once at the start of ``fit()`` when ``input_dim`` is known.
+    def _validate_and_prepare(self, X: np.ndarray) -> np.ndarray:
+        """Convert *X* to a float 2-D array and validate the expected layout."""
+        X_arr = np.asarray(X, dtype=np.float32)
+        if X_arr.ndim == 1:
+            X_arr = X_arr.reshape(1, -1)
+        if X_arr.ndim != 2:
+            raise ValueError(f"Expected a 2-D feature matrix, got shape {X_arr.shape}.")
+        if X_arr.shape[1] < self._core_dim:
+            raise ValueError(
+                "Method 0 expects concatenated per-layer features for "
+                f"{EXPECTED_LAYER_OUTPUTS} outputs and {len(TOKEN_SUMMARIES)} token "
+                f"positions ({self._core_dim} dims), got {X_arr.shape[1]}."
+            )
+        return X_arr
 
-        Args:
-            input_dim: Feature vector dimensionality.
-        """
-        self._net = nn.Sequential(
-            nn.Linear(input_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1),
+    def _slice_pair(
+        self,
+        X: np.ndarray,
+        token_idx: int,
+        layer_idx: int,
+    ) -> np.ndarray:
+        """Return the hidden-state block for one token-position/layer pair."""
+        block_width = EXPECTED_LAYER_OUTPUTS * EXPECTED_HIDDEN_DIM
+        start = token_idx * block_width + layer_idx * EXPECTED_HIDDEN_DIM
+        end = start + EXPECTED_HIDDEN_DIM
+        return X[:, start:end]
+
+    def _score_layer_pairs(self, X: np.ndarray, y: np.ndarray) -> list[dict[str, object]]:
+        """Fit a PCA for every pair and rank pairs by silhouette score."""
+        diagnostics: list[dict[str, object]] = []
+
+        for token_idx, token_name in enumerate(TOKEN_SUMMARIES):
+            for layer_idx in range(EXPECTED_LAYER_OUTPUTS):
+                layer_features = self._slice_pair(X, token_idx, layer_idx)
+                pca = PCA(
+                    n_components=PCA_COMPONENTS,
+                    svd_solver="randomized",
+                    random_state=RANDOM_STATE,
+                )
+                projected = pca.fit_transform(layer_features)
+
+                try:
+                    score = float(silhouette_score(projected, y))
+                except ValueError:
+                    score = float("-inf")
+
+                diagnostics.append(
+                    {
+                        "token_idx": token_idx,
+                        "token_name": token_name,
+                        "layer_idx": layer_idx,
+                        "silhouette": score,
+                        "explained_variance": float(np.sum(pca.explained_variance_ratio_)),
+                        "pca": pca,
+                    }
+                )
+
+        diagnostics.sort(
+            key=lambda item: (float(item["silhouette"]), float(item["explained_variance"])),
+            reverse=True,
         )
+        return diagnostics
 
-    # ------------------------------------------------------------------
+    def _select_pairs(self, diagnostics: list[dict[str, object]]) -> list[dict[str, object]]:
+        """Keep the best-separated layer-position pairs for the final classifier."""
+        positive_pairs = [
+            pair for pair in diagnostics if math.isfinite(float(pair["silhouette"])) and float(pair["silhouette"]) > 0.0
+        ]
+        selected = positive_pairs[:MAX_SELECTED_PAIRS] or diagnostics[:1]
+        return selected
+
+    def _project_selected_pairs(self, X: np.ndarray) -> np.ndarray:
+        """Project all selected layer-position pairs into PCA space."""
+        if not self._selected_pairs:
+            raise RuntimeError("No PCA pairs have been selected. Call fit() first.")
+
+        parts: list[np.ndarray] = []
+        for pair in self._selected_pairs:
+            token_idx = int(pair["token_idx"])
+            layer_idx = int(pair["layer_idx"])
+            pca = pair["pca"]
+            layer_features = self._slice_pair(X, token_idx, layer_idx)
+            parts.append(pca.transform(layer_features))
+
+        if X.shape[1] > self._core_dim:
+            parts.append(X[:, self._core_dim :])
+
+        return np.hstack(parts)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass — returns raw logits of shape ``(n_samples,)``.
+        """Return logits for *x* by routing through ``predict_proba``."""
+        if self._classifier is None:
+            raise RuntimeError("Probe has not been fitted yet. Call fit() first.")
 
-        Args:
-            x: Float tensor of shape ``(n_samples, feature_dim)``.
-
-        Returns:
-            1-D tensor of raw (pre-sigmoid) logits.
-        """
-        if self._net is None:
-            raise RuntimeError(
-                "Network has not been built yet. Call fit() before forward()."
-            )
-        return self._net(x).squeeze(-1)
+        probs = self.predict_proba(x.detach().cpu().numpy())[:, 1]
+        probs = np.clip(probs, 1e-6, 1.0 - 1e-6)
+        logits = np.log(probs / (1.0 - probs)).astype(np.float32)
+        return torch.from_numpy(logits)
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "HallucinationProbe":
-        """Train the probe on labelled feature vectors.
+        """Train the Method 0 probe on labelled feature vectors."""
+        X_arr = self._validate_and_prepare(X)
+        y_arr = np.asarray(y, dtype=int)
 
-        Scales features with ``StandardScaler``, builds the network if needed,
-        and optimises with Adam + ``BCEWithLogitsLoss``.
+        diagnostics = self._score_layer_pairs(X_arr[:, : self._core_dim], y_arr)
+        self._selected_pairs = self._select_pairs(diagnostics)
+        self.layer_diagnostics_ = [
+            {
+                "token_name": str(item["token_name"]),
+                "layer_idx": int(item["layer_idx"]),
+                "silhouette": float(item["silhouette"]),
+                "explained_variance": float(item["explained_variance"]),
+            }
+            for item in diagnostics
+        ]
+        self.selected_layer_pairs_ = [
+            {
+                "token_name": str(item["token_name"]),
+                "layer_idx": int(item["layer_idx"]),
+                "silhouette": float(item["silhouette"]),
+                "explained_variance": float(item["explained_variance"]),
+            }
+            for item in self._selected_pairs
+        ]
 
-        Args:
-            X: Feature matrix of shape ``(n_samples, feature_dim)``.
-            y: Integer label vector of shape ``(n_samples,)``; 0 = truthful,
-               1 = hallucinated.
+        projected = self._project_selected_pairs(X_arr)
+        projected_scaled = self._projection_scaler.fit_transform(projected)
 
-        Returns:
-            ``self`` (for method chaining).
-        """
-        X_scaled = self._scaler.fit_transform(X)
+        self._classifier = LogisticRegression(
+            C=1.0,
+            class_weight="balanced",
+            max_iter=1000,
+            random_state=RANDOM_STATE,
+            solver="liblinear",
+        )
+        self._classifier.fit(projected_scaled, y_arr)
 
-        self._build_network(X_scaled.shape[1])
-
-        X_t = torch.from_numpy(X_scaled).float()
-        y_t = torch.from_numpy(y.astype(np.float32))
-
-        # Weight positive examples by neg/pos ratio to handle class imbalance.
-        n_pos = int(y.sum())
-        n_neg = len(y) - n_pos
-        pos_weight = torch.tensor([n_neg / max(n_pos, 1)], dtype=torch.float32)
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-        # ------------------------------------------------------------------
-        # STUDENT: Replace or extend the training loop below.
-        # ------------------------------------------------------------------
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
-
-        self.train()
-        for _ in range(200):
-            optimizer.zero_grad()
-            logits = self(X_t)
-            loss = criterion(logits, y_t)
-            loss.backward()
-            optimizer.step()
-        # ------------------------------------------------------------------
-
-        self.eval()
         return self
 
     def fit_hyperparameters(
         self, X_val: np.ndarray, y_val: np.ndarray
     ) -> "HallucinationProbe":
-        """Tune the decision threshold on a validation set to maximise F1.
-
-        The chosen threshold is stored in ``self._threshold`` and used by
-        subsequent ``predict`` calls.  Call this after ``fit`` and before
-        ``predict``.
-
-        Args:
-            X_val: Validation feature matrix of shape
-                   ``(n_val_samples, feature_dim)``.
-            y_val: Integer label vector of shape ``(n_val_samples,)``;
-                   0 = truthful, 1 = hallucinated.
-
-        Returns:
-            ``self`` (for method chaining).
-        """
+        """Tune the decision threshold on a validation set to maximise F1."""
         probs = self.predict_proba(X_val)[:, 1]
 
-        # Candidate thresholds: unique predicted probabilities plus a coarse grid.
         candidates = np.unique(np.concatenate([probs, np.linspace(0.0, 1.0, 101)]))
 
         best_threshold = 0.5
         best_f1 = -1.0
-        for t in candidates:
-            y_pred_t = (probs >= t).astype(int)
-            score = f1_score(y_val, y_pred_t, zero_division=0)
+        for threshold in candidates:
+            y_pred = (probs >= threshold).astype(int)
+            score = f1_score(y_val, y_pred, zero_division=0)
             if score > best_f1:
                 best_f1 = score
-                best_threshold = float(t)
+                best_threshold = float(threshold)
 
         self._threshold = best_threshold
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """Predict binary labels for feature vectors.
-
-        Uses the decision threshold in ``self._threshold`` (default ``0.5``;
-        updated by ``fit_hyperparameters``).
-
-        Args:
-            X: Feature matrix of shape ``(n_samples, feature_dim)``.
-
-        Returns:
-            Integer array of shape ``(n_samples,)`` with values in ``{0, 1}``.
-        """
+        """Predict binary labels for feature vectors."""
         return (self.predict_proba(X)[:, 1] >= self._threshold).astype(int)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        """Return class probability estimates.
+        """Return class probability estimates."""
+        if self._classifier is None:
+            raise RuntimeError("Probe has not been fitted yet. Call fit() first.")
 
-        Args:
-            X: Feature matrix of shape ``(n_samples, feature_dim)``.
-
-        Returns:
-            Array of shape ``(n_samples, 2)`` where column 1 contains the
-            estimated probability of the hallucinated class (label 1).
-            Used to compute AUROC.
-        """
-        X_scaled = self._scaler.transform(X)
-        X_t = torch.from_numpy(X_scaled).float()
-        with torch.no_grad():
-            logits = self(X_t)
-            prob_pos = torch.sigmoid(logits).numpy()
+        X_arr = self._validate_and_prepare(X)
+        projected = self._project_selected_pairs(X_arr)
+        projected_scaled = self._projection_scaler.transform(projected)
+        prob_pos = self._classifier.predict_proba(projected_scaled)[:, 1]
         return np.stack([1.0 - prob_pos, prob_pos], axis=1)
-

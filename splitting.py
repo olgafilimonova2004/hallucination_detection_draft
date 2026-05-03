@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 
 
 def split_data(
@@ -30,8 +30,9 @@ def split_data(
 ) -> list[tuple[np.ndarray, np.ndarray | None, np.ndarray]]:
     """Split dataset indices into train, validation, and test subsets.
 
-    The default strategy performs a single stratified random split preserving
-    the class ratio in each subset.
+    The default strategy performs 5-fold stratified cross-validation and carves
+    a validation split out of each training fold. This gives more stable
+    metrics than a single random split while still preserving class balance.
 
     Args:
         y:            Label array of shape ``(N,)`` with values in ``{0, 1}``.
@@ -51,20 +52,31 @@ def split_data(
         function returns the list described above.
     """
 
+    del df, test_size  # Method 0 uses purely stratified sample-level splits.
+
     idx = np.arange(len(y))
+    n_splits = 5
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
 
-    idx_train_val, idx_test = train_test_split(
-        idx,
-        test_size=test_size,
-        random_state=random_state,
-        stratify=y,
-    )
-    relative_val = val_size / (1.0 - test_size)
-    idx_train, idx_val = train_test_split(
-        idx_train_val,
-        test_size=relative_val,
-        random_state=random_state,
-        stratify=y[idx_train_val],
-    )
-    return [(idx_train, idx_val, idx_test)]
+    if val_size <= 0.0:
+        return [
+            (idx_train_val, None, idx_test)
+            for idx_train_val, idx_test in skf.split(idx, y)
+        ]
 
+    # Keep the overall validation share close to ``val_size`` after allocating
+    # one fold to test.
+    relative_val = val_size / (1.0 - 1.0 / n_splits)
+    relative_val = min(max(relative_val, 0.05), 0.5)
+
+    splits: list[tuple[np.ndarray, np.ndarray | None, np.ndarray]] = []
+    for fold_idx, (idx_train_val, idx_test) in enumerate(skf.split(idx, y)):
+        idx_train, idx_val = train_test_split(
+            idx_train_val,
+            test_size=relative_val,
+            random_state=random_state + fold_idx,
+            stratify=y[idx_train_val],
+        )
+        splits.append((idx_train, idx_val, idx_test))
+
+    return splits
