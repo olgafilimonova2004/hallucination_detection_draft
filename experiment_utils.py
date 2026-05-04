@@ -145,10 +145,13 @@ def _compute_spectrum_features(
 
 def extract_feature_cache(
     df: pd.DataFrame,
-    batch_size: int = 4,
+    batch_size: int = 2,
     max_length: int = 512,
     spectrum_top_k: int = 16,
     device: torch.device | None = None,
+    cache_dtype: np.dtype = np.float16,
+    include_icr: bool = False,
+    include_spectrum: bool = False,
 ) -> dict[str, np.ndarray]:
     """Extract reusable hidden-state summaries for all rows in *df*."""
     if device is None:
@@ -158,20 +161,27 @@ def extract_feature_cache(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     model.to(device)
+    n_samples = len(df)
+    n_layers = model.config.num_hidden_layers + 1
+    hidden_dim = model.config.hidden_size
 
     prompts = df["prompt"].tolist()
     responses = df["response"].tolist()
 
-    last_token_features: list[np.ndarray] = []
-    response_last_features: list[np.ndarray] = []
-    response_mean_features: list[np.ndarray] = []
-    icr_norms_features: list[np.ndarray] = []
-    icr_cosine_features: list[np.ndarray] = []
-    spectrum_features: list[np.ndarray] = []
-    spectrum_logdet_features: list[np.ndarray] = []
-    prompt_token_lengths: list[int] = []
-    response_token_lengths: list[int] = []
-    truncated_response_flags: list[int] = []
+    cache: dict[str, np.ndarray] = {
+        "last_token": np.empty((n_samples, n_layers, hidden_dim), dtype=cache_dtype),
+        "response_last": np.empty((n_samples, n_layers, hidden_dim), dtype=cache_dtype),
+        "response_mean": np.empty((n_samples, n_layers, hidden_dim), dtype=cache_dtype),
+        "prompt_token_length": np.empty(n_samples, dtype=np.int32),
+        "response_token_length": np.empty(n_samples, dtype=np.int32),
+        "response_truncated": np.empty(n_samples, dtype=np.int8),
+    }
+    if include_icr:
+        cache["icr_norms"] = np.empty((n_samples, n_layers - 1), dtype=cache_dtype)
+        cache["icr_cosines"] = np.empty((n_samples, n_layers - 2), dtype=cache_dtype)
+    if include_spectrum:
+        cache["spectrum"] = np.empty((n_samples, n_layers, spectrum_top_k), dtype=cache_dtype)
+        cache["spectrum_logdet"] = np.empty((n_samples, n_layers), dtype=cache_dtype)
 
     for start in tqdm(range(0, len(df), batch_size), desc="Caching features", unit="batch"):
         batch_prompts = prompts[start : start + batch_size]
@@ -187,10 +197,16 @@ def extract_feature_cache(
         with torch.no_grad():
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
 
-        hidden = torch.stack(outputs.hidden_states, dim=1).float().cpu()
+        # Move layer outputs to CPU one at a time to avoid a large float32 stack
+        # on the GPU before the copy happens.
+        hidden = torch.stack(
+            [layer.detach().to(device="cpu", dtype=torch.float32) for layer in outputs.hidden_states],
+            dim=1,
+        )
         batch_attention_mask = attention_mask.cpu()
 
         for sample_idx in range(hidden.size(0)):
+            row_idx = start + sample_idx
             sample_hidden = hidden[sample_idx]
             seq_len = int(batch_attention_mask[sample_idx].sum().item())
             last_token_idx = seq_len - 1
@@ -210,47 +226,44 @@ def extract_feature_cache(
             response_last = response_states[:, -1, :]
             response_mean = response_states.mean(dim=1)
 
-            deltas = response_last[1:] - response_last[:-1]
-            icr_norms = torch.linalg.vector_norm(deltas, dim=-1)
+            cache["last_token"][row_idx] = last_token.numpy().astype(cache_dtype, copy=False)
+            cache["response_last"][row_idx] = response_last.numpy().astype(cache_dtype, copy=False)
+            cache["response_mean"][row_idx] = response_mean.numpy().astype(cache_dtype, copy=False)
+            cache["prompt_token_length"][row_idx] = response_start
+            cache["response_token_length"][row_idx] = response_states.size(1)
+            cache["response_truncated"][row_idx] = int(response_start == 0)
 
-            if deltas.size(0) < 2:
-                icr_cosines = deltas.new_zeros(0)
-            else:
-                icr_cosines = torch.nn.functional.cosine_similarity(
-                    deltas[1:],
-                    deltas[:-1],
-                    dim=-1,
-                    eps=1e-8,
+            if include_icr:
+                deltas = response_last[1:] - response_last[:-1]
+                icr_norms = torch.linalg.vector_norm(deltas, dim=-1)
+
+                if deltas.size(0) < 2:
+                    icr_cosines = deltas.new_zeros(0)
+                else:
+                    icr_cosines = torch.nn.functional.cosine_similarity(
+                        deltas[1:],
+                        deltas[:-1],
+                        dim=-1,
+                        eps=1e-8,
+                    )
+                cache["icr_norms"][row_idx] = icr_norms.numpy().astype(cache_dtype, copy=False)
+                cache["icr_cosines"][row_idx] = icr_cosines.numpy().astype(cache_dtype, copy=False)
+
+            if include_spectrum:
+                spectra, spectrum_logdet = _compute_spectrum_features(
+                    layerwise_response_states=response_states,
+                    top_k=spectrum_top_k,
                 )
+                cache["spectrum"][row_idx] = spectra.numpy().astype(cache_dtype, copy=False)
+                cache["spectrum_logdet"][row_idx] = spectrum_logdet.numpy().astype(cache_dtype, copy=False)
 
-            spectra, spectrum_logdet = _compute_spectrum_features(
-                layerwise_response_states=response_states,
-                top_k=spectrum_top_k,
-            )
-
-            last_token_features.append(last_token.numpy())
-            response_last_features.append(response_last.numpy())
-            response_mean_features.append(response_mean.numpy())
-            icr_norms_features.append(icr_norms.numpy())
-            icr_cosine_features.append(icr_cosines.numpy())
-            spectrum_features.append(spectra.numpy())
-            spectrum_logdet_features.append(spectrum_logdet.numpy())
-            prompt_token_lengths.append(response_start)
-            response_token_lengths.append(response_states.size(1))
-            truncated_response_flags.append(int(response_start == 0))
-
-    cache: dict[str, np.ndarray] = {
-        "last_token": np.stack(last_token_features, axis=0).astype(np.float32),
-        "response_last": np.stack(response_last_features, axis=0).astype(np.float32),
-        "response_mean": np.stack(response_mean_features, axis=0).astype(np.float32),
-        "icr_norms": np.stack(icr_norms_features, axis=0).astype(np.float32),
-        "icr_cosines": np.stack(icr_cosine_features, axis=0).astype(np.float32),
-        "spectrum": np.stack(spectrum_features, axis=0).astype(np.float32),
-        "spectrum_logdet": np.stack(spectrum_logdet_features, axis=0).astype(np.float32),
-        "prompt_token_length": np.asarray(prompt_token_lengths, dtype=np.int32),
-        "response_token_length": np.asarray(response_token_lengths, dtype=np.int32),
-        "response_truncated": np.asarray(truncated_response_flags, dtype=np.int8),
-    }
+        del hidden
+        del outputs
+        del batch_attention_mask
+        del input_ids
+        del attention_mask
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     if "label" in df.columns and df["label"].notna().all():
         cache["labels"] = df["label"].astype(int).to_numpy(dtype=np.int32)
@@ -274,4 +287,3 @@ def load_feature_cache(
     """Load a feature cache from disk."""
     with np.load(Path(input_file), allow_pickle=False) as data:
         return {key: data[key] for key in data.files}
-

@@ -56,19 +56,19 @@ Provides shared extraction utilities for later methods:
 git clone <your-repo-url>
 cd SMILES-2026-Hallucination-Detection
 pip install -r requirements.txt
-python method0_diagnostics.py --batch-size 8 --max-length 512
+python method0_diagnostics.py --batch-size 2 --cache-dtype float16 --max-length 512
 ```
 
-If GPU memory is tight:
+If the runtime is stable and you want to push throughput:
 
 ```bash
-python method0_diagnostics.py --batch-size 4 --max-length 512
+python method0_diagnostics.py --batch-size 4 --cache-dtype float16 --max-length 512
 ```
 
 Quick smoke test:
 
 ```bash
-python method0_diagnostics.py --subset 80 --batch-size 4 --overwrite-cache
+python method0_diagnostics.py --subset 80 --batch-size 2 --cache-dtype float16 --overwrite-cache
 ```
 
 ## Method Execution Order

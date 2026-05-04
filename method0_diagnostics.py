@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--cache-file",
-        default="./artifacts/cache/dataset_hidden_cache.npz",
+        default="./artifacts/cache/method0_hidden_cache.npz",
         help="Compressed feature cache reused across experiments.",
     )
     parser.add_argument(
@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=4,
+        default=2,
         help="Batch size used during hidden-state extraction.",
     )
     parser.add_argument(
@@ -77,6 +77,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=6,
         help="Number of best PCA scatter plots to save.",
+    )
+    parser.add_argument(
+        "--cache-dtype",
+        choices=("float16", "float32"),
+        default="float16",
+        help="Storage dtype for cached hidden-state summaries.",
     )
     parser.add_argument(
         "--overwrite-cache",
@@ -114,7 +120,7 @@ def build_summary(cache: dict[str, np.ndarray]) -> tuple[pd.DataFrame, dict[tupl
     for mode in SEQUENCE_MODES:
         mode_features = cache[mode]
         for layer_idx in range(mode_features.shape[1]):
-            X = mode_features[:, layer_idx, :]
+            X = mode_features[:, layer_idx, :].astype(np.float32, copy=False)
             pca = PCA(n_components=2, random_state=42)
             projected = pca.fit_transform(X)
             projections[(mode, layer_idx)] = projected
@@ -276,6 +282,9 @@ def main() -> None:
             batch_size=args.batch_size,
             max_length=args.max_length,
             spectrum_top_k=args.spectrum_top_k,
+            cache_dtype=np.float16 if args.cache_dtype == "float16" else np.float32,
+            include_icr=False,
+            include_spectrum=False,
         )
         save_feature_cache(cache_file, cache)
         print(f"[Method 0] Saved cache to {cache_file}")
