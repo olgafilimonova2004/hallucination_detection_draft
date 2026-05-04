@@ -25,7 +25,11 @@ with:
 - `5` training epochs
 - `batch_size = 32`
 
-That same architecture is implemented in [probe.py](/root/SMILES_2026/SMILES-2026-Hallucination-Detection/method1_saplma/probe.py:1).
+That same architecture is implemented in [probe.py](/root/SMILES_2026/SMILES-2026-Hallucination-Detection/method1_saplma/probe.py:1). The Method 1 adaptation also adds optional:
+
+- `dropout`
+- combined `L1 + L2` regularization
+- smaller MLP depths for the ablation study
 
 ## How layers are chosen
 
@@ -73,6 +77,15 @@ Full run:
 python method1_saplma/run_method1.py --layers auto --auto-top-k 1
 ```
 
+Regularized variants:
+
+```bash
+python method1_saplma/run_method1.py --layers 15 --dropout-p 0.3
+python method1_saplma/run_method1.py --layers 15 --l1-lambda 1e-5 --l2-weight-decay 1e-4
+python method1_saplma/run_method1.py --layers 15 --hidden-dims 256,128
+python method1_saplma/run_method1.py --layers 15 --hidden-dims 256
+```
+
 Layer ablation:
 
 ```bash
@@ -90,6 +103,20 @@ python method1_saplma/run_method1.py --layers 15 --token-mode response_last
 python method1_saplma/run_method1.py --layers 15 --token-mode response_mean
 ```
 
+Regularization and depth ablation sweep:
+
+```bash
+python method1_saplma/run_ablation.py --layers auto --auto-top-k 1
+```
+
+The ablation runner evaluates the requested grid:
+
+- depths: `4`, `3`, `2` linear layers
+- dropout: `0.0`, `0.3`
+- regularization: `off`, `L1 + L2`
+
+That gives `12` configurations in total. The best one is selected by **mean validation AUROC**, not by test AUROC.
+
 ## Outputs
 
 Artifacts are written to:
@@ -97,3 +124,7 @@ Artifacts are written to:
 - `method1_saplma/artifacts/cache/`
 - `method1_saplma/artifacts/method1_results.json`
 - `method1_saplma/artifacts/method1_results_metadata.json`
+- `method1_saplma/artifacts/ablation/ablation_results.csv`
+- `method1_saplma/artifacts/ablation/ablation_results.json`
+- `method1_saplma/artifacts/ablation/best_config.json`
+- `method1_saplma/artifacts/ablation/best_results.json`

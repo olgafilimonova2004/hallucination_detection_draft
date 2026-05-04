@@ -23,10 +23,13 @@ class SAPLMAProbe(nn.Module):
 
     def __init__(
         self,
-        hidden_dims: tuple[int, int, int] = (256, 128, 64),
+        hidden_dims: tuple[int, ...] = (256, 128, 64),
         lr: float = 1e-3,
         epochs: int = 5,
         batch_size: int = 32,
+        dropout_p: float = 0.0,
+        l1_lambda: float = 0.0,
+        l2_weight_decay: float = 0.0,
         random_state: int = 42,
         device: torch.device | None = None,
     ) -> None:
@@ -35,6 +38,9 @@ class SAPLMAProbe(nn.Module):
         self.lr = lr
         self.epochs = epochs
         self.batch_size = batch_size
+        self.dropout_p = dropout_p
+        self.l1_lambda = l1_lambda
+        self.l2_weight_decay = l2_weight_decay
         self.random_state = random_state
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -54,6 +60,8 @@ class SAPLMAProbe(nn.Module):
         for hidden_dim in self.hidden_dims:
             layers.append(nn.Linear(prev_dim, hidden_dim))
             layers.append(nn.ReLU())
+            if self.dropout_p > 0.0:
+                layers.append(nn.Dropout(p=self.dropout_p))
             prev_dim = hidden_dim
         layers.append(nn.Linear(prev_dim, 1))
         self._net = nn.Sequential(*layers).to(self.device)
@@ -82,7 +90,11 @@ class SAPLMAProbe(nn.Module):
         )
 
         criterion = nn.BCEWithLogitsLoss()
-        optimizer = torch.optim.Adam(self._net.parameters(), lr=self.lr)
+        optimizer = torch.optim.Adam(
+            self._net.parameters(),
+            lr=self.lr,
+            weight_decay=self.l2_weight_decay,
+        )
 
         self.train()
         for _ in range(self.epochs):
@@ -90,6 +102,11 @@ class SAPLMAProbe(nn.Module):
                 optimizer.zero_grad()
                 logits = self(batch_x)
                 loss = criterion(logits, batch_y)
+                if self.l1_lambda > 0.0:
+                    l1_penalty = torch.zeros((), device=self.device)
+                    for parameter in self._net.parameters():
+                        l1_penalty = l1_penalty + parameter.abs().sum()
+                    loss = loss + self.l1_lambda * l1_penalty
                 loss.backward()
                 optimizer.step()
 

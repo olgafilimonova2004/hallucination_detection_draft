@@ -15,7 +15,6 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,15 +22,20 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from evaluate import print_summary, run_evaluation, save_results
-from experiment_utils import extract_feature_cache, load_feature_cache, save_feature_cache
+from method1_saplma.common import (
+    DEFAULT_CACHE_FILE,
+    DEFAULT_DATA_FILE,
+    DEFAULT_LAYER_RANKINGS,
+    DEFAULT_OUTPUT_FILE,
+    build_feature_matrix,
+    format_hidden_dims,
+    load_or_build_cache,
+    maybe_take_subset,
+    parse_hidden_dims,
+    resolve_layers,
+)
 from method1_saplma.probe import SAPLMAProbe
 from splitting import split_data
-
-
-DEFAULT_DATA_FILE = ROOT / "data" / "dataset.csv"
-DEFAULT_CACHE_FILE = ROOT / "method1_saplma" / "artifacts" / "cache" / "method1_hidden_cache.npz"
-DEFAULT_OUTPUT_FILE = ROOT / "method1_saplma" / "artifacts" / "method1_results.json"
-DEFAULT_LAYER_RANKINGS = ROOT.parent / "layer_rankings.csv"
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,48 +67,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--mlp-batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument(
+        "--hidden-dims",
+        default="256,128,64",
+        help="Comma-separated hidden widths. Example: 256,128,64",
+    )
+    parser.add_argument("--dropout-p", type=float, default=0.0)
+    parser.add_argument("--l1-lambda", type=float, default=0.0)
+    parser.add_argument("--l2-weight-decay", type=float, default=0.0)
     parser.add_argument("--subset", type=int, default=None)
     parser.add_argument("--overwrite-cache", action="store_true")
     return parser.parse_args()
-
-
-def maybe_take_subset(df: pd.DataFrame, subset_size: int | None) -> pd.DataFrame:
-    if subset_size is None or subset_size >= len(df):
-        return df.reset_index(drop=True)
-
-    parts = []
-    label_counts = df["label"].value_counts(normalize=True).sort_index()
-    for label, frac in label_counts.items():
-        n_label = max(1, int(round(subset_size * frac)))
-        label_df = df[df["label"] == label]
-        parts.append(label_df.sample(n=min(n_label, len(label_df)), random_state=42))
-    return pd.concat(parts, axis=0).sample(frac=1.0, random_state=42).reset_index(drop=True)
-
-
-def resolve_layers(
-    layers_arg: str,
-    layer_rankings_file: Path,
-    auto_top_k: int,
-) -> list[int]:
-    if layers_arg != "auto":
-        return [int(item) for item in layers_arg.split(",") if item.strip()]
-
-    rankings = pd.read_csv(layer_rankings_file)
-    top_layers = rankings.sort_values(
-        ["max_silhouette", "mean_silhouette"],
-        ascending=[False, False],
-    )["layer"].head(auto_top_k)
-    return [int(layer) for layer in top_layers.tolist()]
-
-
-def build_feature_matrix(
-    cache: dict[str, np.ndarray],
-    token_mode: str,
-    layers: list[int],
-) -> np.ndarray:
-    mode_features = cache[token_mode].astype(np.float32, copy=False)
-    selected = [mode_features[:, layer_idx, :] for layer_idx in layers]
-    return np.concatenate(selected, axis=1)
 
 
 def main() -> None:
@@ -119,28 +92,18 @@ def main() -> None:
 
     df = pd.read_csv(data_file)
     df = maybe_take_subset(df, args.subset)
+    hidden_dims = parse_hidden_dims(args.hidden_dims)
 
-    should_rebuild_cache = args.overwrite_cache or args.subset is not None or not cache_file.exists()
-
-    if not should_rebuild_cache:
-        print(f"[Method 1] Loading cache from {cache_file}")
-        cache = load_feature_cache(cache_file)
-        if "labels" not in cache or len(cache["labels"]) != len(df):
-            print("[Method 1] Cache shape mismatch detected. Rebuilding cache.")
-            should_rebuild_cache = True
-
-    if should_rebuild_cache:
-        print(f"[Method 1] Building cache from {data_file}")
-        cache = extract_feature_cache(
-            df=df,
-            batch_size=args.batch_size,
-            max_length=args.max_length,
-            cache_dtype=np.float16 if args.cache_dtype == "float16" else np.float32,
-            include_icr=False,
-            include_spectrum=False,
-        )
-        save_feature_cache(cache_file, cache)
-        print(f"[Method 1] Saved cache to {cache_file}")
+    cache = load_or_build_cache(
+        df=df,
+        cache_file=cache_file,
+        data_file=data_file,
+        batch_size=args.batch_size,
+        max_length=args.max_length,
+        cache_dtype=args.cache_dtype,
+        overwrite_cache=args.overwrite_cache,
+        subset_size=args.subset,
+    )
 
     layers = resolve_layers(
         layers_arg=args.layers,
@@ -149,15 +112,23 @@ def main() -> None:
     )
     print(f"[Method 1] Using token mode: {args.token_mode}")
     print(f"[Method 1] Using layers: {layers}")
+    print(f"[Method 1] Hidden dims: {hidden_dims}")
+    print(f"[Method 1] Dropout p: {args.dropout_p}")
+    print(f"[Method 1] L1 lambda: {args.l1_lambda}")
+    print(f"[Method 1] L2 weight decay: {args.l2_weight_decay}")
 
     X = build_feature_matrix(cache=cache, token_mode=args.token_mode, layers=layers)
     y = cache["labels"].astype(int)
     splits = split_data(y, df)
 
     probe_factory = lambda: SAPLMAProbe(
+        hidden_dims=hidden_dims,
         lr=args.learning_rate,
         epochs=args.epochs,
         batch_size=args.mlp_batch_size,
+        dropout_p=args.dropout_p,
+        l1_lambda=args.l1_lambda,
+        l2_weight_decay=args.l2_weight_decay,
     )
 
     fold_results = run_evaluation(splits, X, y, probe_factory)
@@ -174,6 +145,11 @@ def main() -> None:
         "epochs": args.epochs,
         "mlp_batch_size": args.mlp_batch_size,
         "learning_rate": args.learning_rate,
+        "hidden_dims": list(hidden_dims),
+        "dropout_p": args.dropout_p,
+        "l1_lambda": args.l1_lambda,
+        "l2_weight_decay": args.l2_weight_decay,
+        "hidden_dims_text": format_hidden_dims(hidden_dims),
     }
     metadata_file = output_file.with_name(output_file.stem + "_metadata.json")
     metadata_file.write_text(json.dumps(metadata, indent=2))
