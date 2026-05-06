@@ -21,6 +21,20 @@ adaptations required for `Qwen/Qwen2.5-0.5B`:
 The extractor does **not** save raw attentions. It computes the reduced feature
 vector on the fly and stores only the final per-sample ICR vector.
 
+The default probe now matches the paper MLP path from
+`/root/SMILES_2026/ICR_Probe_paper_repo/src/utils.py`:
+
+- `L -> 128 -> 64 -> 32 -> 1`
+- `BatchNorm1d` after each hidden linear layer
+- `LeakyReLU(0.01)`
+- `Dropout(p=0.3)`
+- `Sigmoid` output
+
+Two regularization variants are exposed through the runner:
+
+- `l2` via `--l2-weight-decay`
+- `l1 + l2` via `--l1-lambda` plus `--l2-weight-decay`
+
 ## ChatML adaptation
 
 The original repo zeros attention outside three "core" regions:
@@ -83,34 +97,40 @@ python3 method2_icr_probe/run_method2.py \
   --cache-dtype float32
 ```
 
-Full logistic-regression run:
-
-```bash
-python method2_icr_probe/run_method2.py \
-  --batch-size 1 \
-  --cache-dtype float32
-```
-
-No-z-norm ablation:
-
-```bash
-python method2_icr_probe/run_method2.py \
-  --disable-z-normalize \
-  --batch-size 1 \
-  --cache-dtype float32 \
-  --output-file method2_icr_probe/artifacts/method2_no_znorm.json
-```
-
-Tiny-MLP ablation:
+Full MLP run with `l2` regularization:
 
 ```bash
 python method2_icr_probe/run_method2.py \
   --classifier mlp \
-  --hidden-dims 32 \
+  --hidden-dims 128,64,32 \
   --dropout-p 0.3 \
+  --l2-weight-decay 1e-4 \
+  --batch-size 1 \
+  --cache-dtype float32
+```
+
+MLP run with `l1 + l2` regularization:
+
+```bash
+python method2_icr_probe/run_method2.py \
+  --classifier mlp \
+  --hidden-dims 128,64,32 \
+  --dropout-p 0.3 \
+  --l1-lambda 1e-5 \
+  --l2-weight-decay 1e-4 \
   --batch-size 1 \
   --cache-dtype float32 \
-  --output-file method2_icr_probe/artifacts/method2_mlp.json
+  --output-file method2_icr_probe/artifacts/method2_l1_l2.json
+```
+
+Optional logistic-regression baseline:
+
+```bash
+python method2_icr_probe/run_method2.py \
+  --classifier logistic \
+  --batch-size 1 \
+  --cache-dtype float32 \
+  --output-file method2_icr_probe/artifacts/method2_logistic.json
 ```
 
 ## Outputs

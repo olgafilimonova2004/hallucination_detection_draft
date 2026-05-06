@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--classifier",
         choices=("logistic", "mlp"),
-        default="logistic",
+        default="mlp",
         help="Probe family used on top of the extracted ICR vector.",
     )
     parser.add_argument("--logistic-c", type=float, default=1.0)
@@ -57,6 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mlp-batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--dropout-p", type=float, default=0.3)
+    parser.add_argument("--l1-lambda", type=float, default=0.0)
     parser.add_argument("--l2-weight-decay", type=float, default=1e-4)
     parser.add_argument("--subset", type=int, default=None)
     parser.add_argument("--overwrite-cache", action="store_true")
@@ -96,6 +97,7 @@ def main() -> None:
     if args.classifier == "mlp":
         print(f"[Method 2] Hidden dims: {hidden_dims}")
         print(f"[Method 2] Dropout p: {args.dropout_p}")
+        print(f"[Method 2] L1 lambda: {args.l1_lambda}")
         print(f"[Method 2] L2 weight decay: {args.l2_weight_decay}")
 
     X = build_feature_matrix(cache)
@@ -111,6 +113,7 @@ def main() -> None:
             epochs=args.epochs,
             batch_size=args.mlp_batch_size,
             dropout_p=args.dropout_p,
+            l1_lambda=args.l1_lambda,
             l2_weight_decay=args.l2_weight_decay,
         )
 
@@ -137,7 +140,17 @@ def main() -> None:
         "mlp_batch_size": args.mlp_batch_size,
         "learning_rate": args.learning_rate,
         "dropout_p": args.dropout_p,
+        "l1_lambda": args.l1_lambda,
         "l2_weight_decay": args.l2_weight_decay,
+        "regularization": (
+            "l1+l2"
+            if args.classifier == "mlp" and args.l1_lambda > 0.0 and args.l2_weight_decay > 0.0
+            else "l1"
+            if args.classifier == "mlp" and args.l1_lambda > 0.0
+            else "l2"
+            if args.classifier == "mlp" and args.l2_weight_decay > 0.0
+            else "none"
+        ),
         "feature_dim": int(X.shape[1]),
         "attention_pooling": "mean_all_heads",
         "use_induction_head": False,

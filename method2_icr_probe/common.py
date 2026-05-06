@@ -21,7 +21,7 @@ DEFAULT_CACHE_FILE = ROOT / "method2_icr_probe" / "artifacts" / "cache" / "metho
 DEFAULT_OUTPUT_FILE = ROOT / "method2_icr_probe" / "artifacts" / "method2_results.json"
 DEFAULT_TOP_K = 10
 DEFAULT_BATCH_SIZE = 1
-DEFAULT_MLP_HIDDEN_DIMS = (32,)
+DEFAULT_MLP_HIDDEN_DIMS = (128, 64, 32)
 
 USER_START_MARKER = "<|im_start|>user\n"
 USER_END_MARKER = "\n<|im_end|>\n<|im_start|>assistant\n"

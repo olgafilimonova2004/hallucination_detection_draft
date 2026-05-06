@@ -78,16 +78,58 @@ class ICRLogisticProbe(_ThresholdedProbe):
         return np.stack([1.0 - prob_pos, prob_pos], axis=1)
 
 
-class ICRMLPProbe(_ThresholdedProbe):
-    """Tiny MLP ablation over the adapted ICR vectors."""
+class _PaperICRNetwork(nn.Module):
+    """Paper-style ICR MLP with optional width overrides."""
 
     def __init__(
         self,
-        hidden_dims: tuple[int, ...] = (32,),
+        input_dim: int,
+        hidden_dims: tuple[int, ...] = (128, 64, 32),
+        dropout_p: float = 0.3,
+    ) -> None:
+        super().__init__()
+        layers: list[nn.Module] = []
+        prev_dim = input_dim
+
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.LeakyReLU(negative_slope=0.01))
+            layers.append(nn.Dropout(dropout_p))
+            prev_dim = hidden_dim
+
+        layers.append(nn.Linear(prev_dim, 1))
+        layers.append(nn.Sigmoid())
+        self.network = nn.Sequential(*layers)
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.kaiming_uniform_(module.weight, a=0.01, nonlinearity="leaky_relu")
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.BatchNorm1d):
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if torch.isnan(x).any():
+            raise ValueError(f"Input contains NaN values: {int(torch.isnan(x).sum().item())}")
+        return self.network(x).squeeze(-1)
+
+
+class ICRMLPProbe(_ThresholdedProbe):
+    """Paper-style MLP over the adapted ICR vectors."""
+
+    def __init__(
+        self,
+        hidden_dims: tuple[int, ...] = (128, 64, 32),
         lr: float = 1e-3,
         epochs: int = 25,
         batch_size: int = 32,
         dropout_p: float = 0.3,
+        l1_lambda: float = 0.0,
         l2_weight_decay: float = 1e-4,
         random_state: int = 42,
         device: torch.device | None = None,
@@ -98,12 +140,11 @@ class ICRMLPProbe(_ThresholdedProbe):
         self.epochs = epochs
         self.batch_size = batch_size
         self.dropout_p = dropout_p
+        self.l1_lambda = l1_lambda
         self.l2_weight_decay = l2_weight_decay
         self.random_state = random_state
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        self._scaler = StandardScaler()
-        self._net: nn.Sequential | None = None
+        self._net: _PaperICRNetwork | None = None
 
     def _set_seed(self) -> None:
         random.seed(self.random_state)
@@ -113,16 +154,11 @@ class ICRMLPProbe(_ThresholdedProbe):
             torch.cuda.manual_seed_all(self.random_state)
 
     def _build_network(self, input_dim: int) -> None:
-        layers: list[nn.Module] = []
-        prev_dim = input_dim
-        for hidden_dim in self.hidden_dims:
-            layers.append(nn.Linear(prev_dim, hidden_dim))
-            layers.append(nn.ReLU())
-            if self.dropout_p > 0.0:
-                layers.append(nn.Dropout(p=self.dropout_p))
-            prev_dim = hidden_dim
-        layers.append(nn.Linear(prev_dim, 1))
-        self._net = nn.Sequential(*layers).to(self.device)
+        self._net = _PaperICRNetwork(
+            input_dim=input_dim,
+            hidden_dims=self.hidden_dims,
+            dropout_p=self.dropout_p,
+        ).to(self.device)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self._net is None:
@@ -133,12 +169,10 @@ class ICRMLPProbe(_ThresholdedProbe):
         self._set_seed()
         X_arr = np.asarray(X, dtype=np.float32)
         y_arr = np.asarray(y, dtype=np.float32)
-        X_scaled = self._scaler.fit_transform(X_arr)
-
-        self._build_network(X_scaled.shape[1])
+        self._build_network(X_arr.shape[1])
         assert self._net is not None
 
-        X_t = torch.from_numpy(X_scaled).to(self.device)
+        X_t = torch.from_numpy(X_arr).to(self.device)
         y_t = torch.from_numpy(y_arr).to(self.device)
 
         dataset = torch.utils.data.TensorDataset(X_t, y_t)
@@ -148,7 +182,7 @@ class ICRMLPProbe(_ThresholdedProbe):
             shuffle=True,
         )
 
-        criterion = nn.BCEWithLogitsLoss()
+        criterion = nn.BCELoss()
         optimizer = torch.optim.Adam(
             self._net.parameters(),
             lr=self.lr,
@@ -159,8 +193,13 @@ class ICRMLPProbe(_ThresholdedProbe):
         for _ in range(self.epochs):
             for batch_x, batch_y in loader:
                 optimizer.zero_grad()
-                logits = self(batch_x)
-                loss = criterion(logits, batch_y)
+                probs = self(batch_x)
+                loss = criterion(probs, batch_y)
+                if self.l1_lambda > 0.0:
+                    l1_penalty = torch.zeros((), device=self.device)
+                    for parameter in self._net.parameters():
+                        l1_penalty = l1_penalty + parameter.abs().sum()
+                    loss = loss + self.l1_lambda * l1_penalty
                 loss.backward()
                 optimizer.step()
 
@@ -172,12 +211,10 @@ class ICRMLPProbe(_ThresholdedProbe):
             raise RuntimeError("Probe has not been fitted yet. Call fit() first.")
 
         X_arr = np.asarray(X, dtype=np.float32)
-        X_scaled = self._scaler.transform(X_arr)
-        X_t = torch.from_numpy(X_scaled).to(self.device)
+        X_t = torch.from_numpy(X_arr).to(self.device)
 
         self.eval()
         with torch.no_grad():
-            logits = self(X_t)
-            prob_pos = torch.sigmoid(logits).detach().cpu().numpy()
+            prob_pos = self(X_t).detach().cpu().numpy()
 
         return np.stack([1.0 - prob_pos, prob_pos], axis=1)
