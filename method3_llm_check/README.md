@@ -1,113 +1,163 @@
-# Method 3 — LLM-Check Attention Score
+# Method 3 — LLM-Check Feature-Family Ablation
 
-This folder contains the **Method 3 LLM-Check adaptation** for the SMILES task,
-restricted to the **attention score only**, as requested.
+This folder now supports a broader **LLM-Check ablation study** based on the
+feature families implemented in
+`/root/SMILES_2026/LLM_Check_paper_repo/common_utils.py`.
 
-## What is implemented
+The implementation keeps the SMILES project adaptation:
 
-The implementation follows the attention-score path from
-`/root/SMILES_2026/LLM_Check_paper_repo/common_utils.py`, specifically
-`get_attn_eig_prod`, but adapted to the SMILES project structure and the Qwen
-runtime.
+- base model: `Qwen/Qwen2.5-0.5B`
+- response-preserving truncation
+- evaluation on `data/dataset.csv` only
+- 5-fold CV with the repo's `splitting.py`
 
-Important clarification:
+## Feature Families Implemented
 
-- despite the helper name `get_attn_eig_prod`, the repo does **not** compute an
-  eigendecomposition
-- the implemented score is the mean log of the diagonal attention values on the
-  selected token span, summed across heads
+The paper repo exposes three feature families:
 
-For a layer `l` and attention head `h`, with response-span attention matrix
-`A^{(l,h)}_resp`, the score is:
+1. `logit`
+2. `hidden`
+3. `attns`
+
+This adaptation extracts all three in a **single cache build** and then forms
+different feature sets by concatenation.
+
+### `logit` features
+
+The logit family is a 3-dimensional vector:
+
+- `perplexity`
+- `window_entropy_w1`
+- `logit_entropy_top50`
+
+These follow the formulas in the paper repo:
+
+- perplexity over response tokens using the previous-token logits
+- maximum single-token entropy window with `w=1`
+- entropy over the top-50 logits on response tokens
+
+So:
 
 ```text
-score_l = sum_h mean(log(diag(A^{(l,h)}_resp)))
+logit dim = 3
 ```
 
-This implementation builds a **sample-level feature vector across layers** by
-computing that score for every selected layer.
+### `hidden` features
 
-## Alignment to the paper repo
+The hidden family computes one centered SVD score per transformer layer.
 
-The LLM-Check repo uses:
+For Qwen with 24 transformer layers, this produces:
+
+```text
+hidden dim = 24
+```
+
+This matches the paper-repo loop:
+
+```python
+for layer_num in range(1, len(hidden_acts[0])):
+```
+
+which skips the embedding entry in `hidden_states` and keeps transformer layers
+`1..24` in one-based numbering.
+
+### `attns` features
+
+The attention family computes one score per selected attention layer:
+
+```text
+score_l = sum_h mean(log(diag(A_resp^(l,h))))
+```
+
+For Qwen with 24 attention layers, the paper repo uses:
 
 ```python
 for layer_num in range(1, len(attns[0])):
-    ...
 ```
 
-So it **skips the first attention layer** when collecting per-layer scores.
+which skips the first actual attention layer. Therefore:
 
-To match that behavior, Method 3 also skips attention layer index `0`. For
-`Qwen/Qwen2.5-0.5B`, which has 24 transformer layers, the resulting feature
-vector has length `23`, corresponding to zero-based layer indices `1..23`
-(or transformer layers `2..24` in one-based numbering).
-
-## Token span choice
-
-The repo supports a `--use_toklens` option that slices to the response span.
-For SMILES, this adaptation uses the **response-only span by default**, because
-that is the most direct equivalent of the repo's `tok_lens` setting and is the
-best fit for this task.
-
-The response span is produced by the shared response-preserving tokenization
-logic already used elsewhere in the repo:
-
-- keep the response tail intact
-- crop the start of the prompt first if truncation is needed
-- score the attention only on the preserved response tokens
-
-The dataset response column already contains the final generated text, so this
-method does not need hidden-state caches or additional generations.
-
-## Numerical detail
-
-The original repo applies `log(diagonal_attention)` directly.
-
-This implementation uses a small clamp before the log:
-
-```python
-diag = diag.clamp_min(1e-12)
+```text
+attns dim = 23
 ```
 
-This is only a numerical safeguard against `log(0)` and does not change the
-feature definition in any meaningful way.
+corresponding to transformer layers `2..24` in one-based numbering.
 
-## Qwen-specific runtime detail
+## Feature Sets Compared
 
-Qwen does not expose attention tensors under the default `sdpa` path on this
-machine. Method 3 therefore loads the model with:
+The ablation runner compares these feature sets:
 
-```python
-attn_implementation="eager"
+- `logit`
+- `hidden`
+- `attns`
+- `logit_hidden`
+- `logit_attns`
+- `hidden_attns`
+- `logit_hidden_attns`
+
+Their dimensions for Qwen are:
+
+- `logit`: `3`
+- `hidden`: `24`
+- `attns`: `23`
+- `logit_hidden`: `27`
+- `logit_attns`: `26`
+- `hidden_attns`: `47`
+- `logit_hidden_attns`: `50`
+
+## Classifiers Compared
+
+Each feature set is evaluated with:
+
+1. `logistic` regression
+2. lightweight `mlp`
+
+The lightweight MLP is:
+
+```text
+input -> 64 -> 32 -> 1
 ```
 
-Without that change, `output_attentions=True` does not provide the matrices
-needed for the score.
+with:
 
-## Classifier ablation
-
-The requested ablation study compares exactly two classifier configurations on
-top of the Method 3 feature vector:
-
-1. `logistic_regression`
-2. `mlp_dropout0.3_l2`
-
-The MLP configuration uses:
-
-- input dim = `23`
-- hidden dims = `64 -> 32`
 - `ReLU`
 - `Dropout(p=0.3)`
-- `Adam` with `L2` regularization via `weight_decay`
-
-The combined ablation output is written to one JSON file:
-
-- `method3_llm_check/artifacts/ablation/ablation_results.json`
-
-That file contains both configurations and their cross-fold summary metrics.
+- `Adam`
+- `L2` regularization via `weight_decay=1e-4`
 
 ## Commands
+
+Single run on one feature set:
+
+```bash
+python method3_llm_check/run_method3.py \
+  --feature-set attns \
+  --classifier logistic \
+  --batch-size 1 \
+  --cache-dtype float32
+```
+
+Single MLP run on a combined feature set:
+
+```bash
+python method3_llm_check/run_method3.py \
+  --feature-set logit_hidden_attns \
+  --classifier mlp \
+  --hidden-dims 64,32 \
+  --dropout-p 0.3 \
+  --l2-weight-decay 1e-4 \
+  --batch-size 1 \
+  --cache-dtype float32
+```
+
+Full ablation study:
+
+```bash
+python method3_llm_check/run_ablation.py \
+  --feature-sets logit,hidden,attns,logit_hidden,logit_attns,hidden_attns,logit_hidden_attns \
+  --batch-size 1 \
+  --cache-dtype float32
+```
 
 Smoke test:
 
@@ -121,34 +171,14 @@ python3 method3_llm_check/run_ablation.py \
   --output-dir method3_llm_check/artifacts/ablation_smoke
 ```
 
-Single logistic-regression run:
+## Colab Notebook
 
-```bash
-python method3_llm_check/run_method3.py \
-  --classifier logistic \
-  --batch-size 1 \
-  --cache-dtype float32
-```
+Use:
 
-Single MLP run:
+- `method3_llm_check/LLMCheck_Ablation_Colab.ipynb`
 
-```bash
-python method3_llm_check/run_method3.py \
-  --classifier mlp \
-  --hidden-dims 64,32 \
-  --dropout-p 0.3 \
-  --l2-weight-decay 1e-4 \
-  --batch-size 1 \
-  --cache-dtype float32
-```
-
-Requested two-config ablation:
-
-```bash
-python method3_llm_check/run_ablation.py \
-  --batch-size 1 \
-  --cache-dtype float32
-```
+That notebook runs the full ablation study and saves one combined JSON file
+that can be inspected to identify the best configuration.
 
 ## Outputs
 
@@ -160,13 +190,17 @@ Artifacts are written to:
 - `method3_llm_check/artifacts/ablation/ablation_results.csv`
 - `method3_llm_check/artifacts/ablation/ablation_results.json`
 
-The cached `.npz` file contains:
+The shared cache now stores:
 
+- `logit_metrics_vector`: shape `(n_samples, 3)`
+- `hidden_score_vector`: shape `(n_samples, 24)`
 - `attention_score_vector`: shape `(n_samples, 23)`
-- `selected_layer_indices_zero_based`
-- `selected_transformer_layers_1based`
+- `logit_metric_names`
+- hidden-layer index metadata
+- attention-layer index metadata
 - `prompt_token_length`
 - `response_token_length`
 - `response_truncated`
 - `max_length`
 - `labels`
+

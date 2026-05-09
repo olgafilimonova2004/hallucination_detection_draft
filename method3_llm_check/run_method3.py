@@ -1,4 +1,4 @@
-"""Run Method 3 (LLM-Check attention score) on dataset.csv."""
+"""Run Method 3 (LLM-Check features) on dataset.csv."""
 
 from __future__ import annotations
 
@@ -19,12 +19,16 @@ from method3_llm_check.common import (
     DEFAULT_CACHE_FILE,
     DEFAULT_DATA_FILE,
     DEFAULT_DROPOUT_P,
+    DEFAULT_FEATURE_SET,
+    DEFAULT_FEATURE_SETS,
     DEFAULT_L2_WEIGHT_DECAY,
+    DEFAULT_LOGIT_METRIC_NAMES,
     DEFAULT_MLP_HIDDEN_DIMS,
     DEFAULT_OUTPUT_FILE,
-    LLMCheckAttentionLogisticProbe,
-    LLMCheckAttentionMLPProbe,
+    LLMCheckLogisticProbe,
+    LLMCheckMLPProbe,
     build_feature_matrix,
+    build_feature_set_metadata,
     format_hidden_dims,
     load_or_build_cache,
     maybe_take_subset,
@@ -34,7 +38,7 @@ from splitting import split_data
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Method 3 (LLM-Check attention score) on dataset.csv.")
+    parser = argparse.ArgumentParser(description="Run Method 3 (LLM-Check features) on dataset.csv.")
     parser.add_argument("--data-file", default=str(DEFAULT_DATA_FILE))
     parser.add_argument("--cache-file", default=str(DEFAULT_CACHE_FILE))
     parser.add_argument("--output-file", default=str(DEFAULT_OUTPUT_FILE))
@@ -42,10 +46,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--cache-dtype", choices=("float16", "float32"), default="float32")
     parser.add_argument(
+        "--feature-set",
+        choices=DEFAULT_FEATURE_SETS,
+        default=DEFAULT_FEATURE_SET,
+        help="Which LLM-Check feature family or concatenated family to evaluate.",
+    )
+    parser.add_argument(
         "--classifier",
         choices=("logistic", "mlp"),
         default="logistic",
-        help="Probe family used on top of the extracted attention-score vector.",
+        help="Probe family used on top of the extracted LLM-Check features.",
     )
     parser.add_argument("--logistic-c", type=float, default=1.0)
     parser.add_argument("--hidden-dims", default=format_hidden_dims(DEFAULT_MLP_HIDDEN_DIMS))
@@ -83,24 +93,24 @@ def main() -> None:
         subset_size=args.subset,
     )
 
+    feature_metadata = build_feature_set_metadata(cache, args.feature_set)
+    print(f"[Method 3] Feature set: {args.feature_set}")
+    print(f"[Method 3] Components: {feature_metadata['components']}")
+    print(f"[Method 3] Feature dim: {feature_metadata['feature_dim']}")
     print(f"[Method 3] Classifier: {args.classifier}")
-    print(
-        "[Method 3] Selected attention layers (zero-based): "
-        f"{cache['selected_layer_indices_zero_based'].astype(int).tolist()}"
-    )
     if args.classifier == "mlp":
         print(f"[Method 3] Hidden dims: {hidden_dims}")
         print(f"[Method 3] Dropout p: {args.dropout_p}")
         print(f"[Method 3] L2 weight decay: {args.l2_weight_decay}")
 
-    X = build_feature_matrix(cache)
+    X = build_feature_matrix(cache, feature_set=args.feature_set)
     y = cache["labels"].astype(int)
     splits = split_data(y, df)
 
     if args.classifier == "logistic":
-        probe_factory = lambda: LLMCheckAttentionLogisticProbe(c=args.logistic_c)
+        probe_factory = lambda: LLMCheckLogisticProbe(c=args.logistic_c)
     else:
-        probe_factory = lambda: LLMCheckAttentionMLPProbe(
+        probe_factory = lambda: LLMCheckMLPProbe(
             hidden_dims=hidden_dims,
             lr=args.learning_rate,
             epochs=args.epochs,
@@ -114,8 +124,11 @@ def main() -> None:
     save_results(fold_results, X.shape[1], len(X), extract_time=0.0, output_file=str(output_file))
 
     metadata = {
-        "method": "LLM-Check Attention",
-        "feature_type": "attention_diagonal_log_score",
+        "method": "LLM-Check",
+        "feature_set": args.feature_set,
+        "description": feature_metadata["description"],
+        "components": feature_metadata["components"],
+        "component_dims": feature_metadata["component_dims"],
         "cache_file": str(cache_file),
         "data_file": str(data_file),
         "subset": args.subset,
@@ -132,11 +145,31 @@ def main() -> None:
         "dropout_p": args.dropout_p,
         "l2_weight_decay": args.l2_weight_decay,
         "feature_dim": int(X.shape[1]),
-        "selected_layer_indices_zero_based": cache["selected_layer_indices_zero_based"].astype(int).tolist(),
-        "selected_transformer_layers_1based": cache["selected_transformer_layers_1based"].astype(int).tolist(),
-        "response_span": "response_only",
-        "formula": "sum_heads(mean(log(diag(attention_layer[:, response, response]))))",
-        "llm_check_repo_alignment": "matches get_attn_eig_prod and compute_scores layer loop",
+        "response_span": feature_metadata["response_span"],
+        "logit_metric_names": cache["logit_metric_names"].tolist(),
+        "selected_hidden_state_indices_hf": cache["selected_hidden_state_indices_hf"].astype(int).tolist(),
+        "selected_hidden_transformer_layers_zero_based": cache[
+            "selected_hidden_transformer_layers_zero_based"
+        ].astype(int).tolist(),
+        "selected_hidden_transformer_layers_1based": cache[
+            "selected_hidden_transformer_layers_1based"
+        ].astype(int).tolist(),
+        "selected_attention_layer_indices_zero_based": cache[
+            "selected_attention_layer_indices_zero_based"
+        ].astype(int).tolist(),
+        "selected_attention_transformer_layers_1based": cache[
+            "selected_attention_transformer_layers_1based"
+        ].astype(int).tolist(),
+        "feature_formulas": {
+            "logit": {
+                "metrics": list(DEFAULT_LOGIT_METRIC_NAMES),
+                "perplexity": "exp(-mean(log p(correct_response_token | previous_context)))",
+                "window_entropy_w1": "max_token mean(-p log p) over full-vocab softmax",
+                "logit_entropy_top50": "mean(-p log p) over top-50 logits on response tokens",
+            },
+            "hidden": "per-layer mean(log(svdvals(Z^T J Z + alpha I))) over response tokens",
+            "attns": "per-layer sum_heads(mean(log(diag(attention_layer[:, response, response]))))",
+        },
     }
     metadata_file = output_file.with_name(output_file.stem + "_metadata.json")
     metadata_file.write_text(json.dumps(metadata, indent=2))
