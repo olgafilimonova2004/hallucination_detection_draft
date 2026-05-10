@@ -35,24 +35,19 @@ def _combine_prompt_and_response(
     response_ids: list[int],
     max_length: int,
 ) -> tuple[list[int], int, int]:
-    """Assemble a sequence while preserving the response tail.
+    """Assemble a sequence without truncation.
 
-    We keep the full response whenever possible and crop the *start* of the
-    prompt first. This is better suited for hallucination analysis than the
-    default tokenizer truncation, which would otherwise remove the end of the
-    model's answer.
+    The ``max_length`` argument is accepted for backward compatibility with the
+    existing method runners but is intentionally ignored. The full tokenized
+    prompt and full tokenized response are preserved.
     """
+    del max_length
+
     if not response_ids:
         raise ValueError("Encountered an empty tokenized response.")
 
-    if len(response_ids) >= max_length:
-        kept_response = response_ids[-max_length:]
-        return kept_response, 0, len(kept_response)
-
-    prompt_budget = max_length - len(response_ids)
-    kept_prompt = prompt_ids[-prompt_budget:] if prompt_budget > 0 else []
-    input_ids = kept_prompt + response_ids
-    response_start = len(kept_prompt)
+    input_ids = prompt_ids + response_ids
+    response_start = len(prompt_ids)
     response_end = len(input_ids)
     return input_ids, response_start, response_end
 
@@ -64,7 +59,7 @@ def build_response_preserving_batch(
     max_length: int,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, list[tuple[int, int]]]:
-    """Tokenize a batch while preserving the response tokens."""
+    """Tokenize a batch while preserving the full prompt and response."""
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -175,6 +170,7 @@ def extract_feature_cache(
         "prompt_token_length": np.empty(n_samples, dtype=np.int32),
         "response_token_length": np.empty(n_samples, dtype=np.int32),
         "response_truncated": np.empty(n_samples, dtype=np.int8),
+        "truncation_disabled": np.asarray([1], dtype=np.int8),
     }
     if include_icr:
         cache["icr_norms"] = np.empty((n_samples, n_layers - 1), dtype=cache_dtype)

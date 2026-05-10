@@ -313,6 +313,7 @@ def extract_llm_check_feature_cache(
         "response_token_length": np.empty(n_samples, dtype=np.int32),
         "response_truncated": np.empty(n_samples, dtype=np.int8),
         "max_length": np.asarray([max_length], dtype=np.int32),
+        "truncation_disabled": np.asarray([1], dtype=np.int8),
     }
 
     for start in tqdm(range(0, n_samples, batch_size), desc="Caching Method 3 features", unit="batch"):
@@ -477,15 +478,18 @@ def load_or_build_cache(
         "selected_attention_transformer_layers_1based",
         "labels",
         "max_length",
+        "truncation_disabled",
     }
 
     if not should_rebuild_cache:
         print(f"[Method 3] Loading cache from {cache_file}")
         cache = load_feature_cache(cache_file)
         labels_match = "labels" in cache and len(cache["labels"]) == len(df)
-        max_length_match = int(cache.get("max_length", np.asarray([-1], dtype=np.int32))[0]) == max_length
         keys_match = required_keys.issubset(cache.keys())
-        if not (labels_match and max_length_match and keys_match):
+        truncation_disabled_match = (
+            int(cache.get("truncation_disabled", np.asarray([0], dtype=np.int8))[0]) == 1
+        )
+        if not (labels_match and keys_match and truncation_disabled_match):
             print("[Method 3] Cache metadata mismatch detected. Rebuilding cache.")
             should_rebuild_cache = True
 
@@ -681,4 +685,3 @@ class LLMCheckMLPProbe(_ThresholdedProbe):
 # Backward-compatible aliases for the original attention-only Method 3 API.
 LLMCheckAttentionLogisticProbe = LLMCheckLogisticProbe
 LLMCheckAttentionMLPProbe = LLMCheckMLPProbe
-

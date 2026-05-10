@@ -34,7 +34,7 @@ from method1_saplma.common import (
     parse_hidden_dims,
     resolve_layers,
 )
-from method1_saplma.probe import SAPLMAProbe
+from method1_saplma.probe import SAPLMALogisticProbe, SAPLMAProbe
 from splitting import split_data
 
 
@@ -62,8 +62,20 @@ def parse_args() -> argparse.Namespace:
         help="Hidden-state view fed to the MLP.",
     )
     parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--max-length", type=int, default=512)
+    parser.add_argument(
+        "--max-length",
+        type=int,
+        default=512,
+        help="Deprecated compatibility flag. Truncation is disabled and the full prompt+response is used.",
+    )
     parser.add_argument("--cache-dtype", choices=("float16", "float32"), default="float16")
+    parser.add_argument(
+        "--classifier",
+        choices=("mlp", "logistic"),
+        default="mlp",
+        help="Probe family used on top of the extracted SAPLMA features.",
+    )
+    parser.add_argument("--logistic-c", type=float, default=1.0)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--mlp-batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
@@ -112,24 +124,29 @@ def main() -> None:
     )
     print(f"[Method 1] Using token mode: {args.token_mode}")
     print(f"[Method 1] Using layers: {layers}")
-    print(f"[Method 1] Hidden dims: {hidden_dims}")
-    print(f"[Method 1] Dropout p: {args.dropout_p}")
-    print(f"[Method 1] L1 lambda: {args.l1_lambda}")
-    print(f"[Method 1] L2 weight decay: {args.l2_weight_decay}")
+    print(f"[Method 1] Classifier: {args.classifier}")
+    if args.classifier == "mlp":
+        print(f"[Method 1] Hidden dims: {hidden_dims}")
+        print(f"[Method 1] Dropout p: {args.dropout_p}")
+        print(f"[Method 1] L1 lambda: {args.l1_lambda}")
+        print(f"[Method 1] L2 weight decay: {args.l2_weight_decay}")
 
     X = build_feature_matrix(cache=cache, token_mode=args.token_mode, layers=layers)
     y = cache["labels"].astype(int)
     splits = split_data(y, df)
 
-    probe_factory = lambda: SAPLMAProbe(
-        hidden_dims=hidden_dims,
-        lr=args.learning_rate,
-        epochs=args.epochs,
-        batch_size=args.mlp_batch_size,
-        dropout_p=args.dropout_p,
-        l1_lambda=args.l1_lambda,
-        l2_weight_decay=args.l2_weight_decay,
-    )
+    if args.classifier == "logistic":
+        probe_factory = lambda: SAPLMALogisticProbe(c=args.logistic_c)
+    else:
+        probe_factory = lambda: SAPLMAProbe(
+            hidden_dims=hidden_dims,
+            lr=args.learning_rate,
+            epochs=args.epochs,
+            batch_size=args.mlp_batch_size,
+            dropout_p=args.dropout_p,
+            l1_lambda=args.l1_lambda,
+            l2_weight_decay=args.l2_weight_decay,
+        )
 
     fold_results = run_evaluation(splits, X, y, probe_factory)
     print_summary(fold_results, X.shape[1], len(X), extract_time=0.0)
@@ -142,6 +159,8 @@ def main() -> None:
         "cache_file": str(cache_file),
         "data_file": str(data_file),
         "subset": args.subset,
+        "classifier": args.classifier,
+        "logistic_c": args.logistic_c,
         "epochs": args.epochs,
         "mlp_batch_size": args.mlp_batch_size,
         "learning_rate": args.learning_rate,
@@ -150,6 +169,7 @@ def main() -> None:
         "l1_lambda": args.l1_lambda,
         "l2_weight_decay": args.l2_weight_decay,
         "hidden_dims_text": format_hidden_dims(hidden_dims),
+        "truncation": "disabled",
     }
     metadata_file = output_file.with_name(output_file.stem + "_metadata.json")
     metadata_file.write_text(json.dumps(metadata, indent=2))

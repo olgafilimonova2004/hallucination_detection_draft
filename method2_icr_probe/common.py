@@ -19,9 +19,11 @@ DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-0.5B"
 DEFAULT_DATA_FILE = ROOT / "data" / "dataset.csv"
 DEFAULT_CACHE_FILE = ROOT / "method2_icr_probe" / "artifacts" / "cache" / "method2_icr_cache.npz"
 DEFAULT_OUTPUT_FILE = ROOT / "method2_icr_probe" / "artifacts" / "method2_results.json"
+DEFAULT_ABLATION_DIR = ROOT / "method2_icr_probe" / "artifacts" / "ablation"
 DEFAULT_TOP_K = 10
 DEFAULT_BATCH_SIZE = 1
 DEFAULT_MLP_HIDDEN_DIMS = (128, 64, 32)
+DEFAULT_BINARY_MLP_HIDDEN_DIMS = (128, 64)
 
 USER_START_MARKER = "<|im_start|>user\n"
 USER_END_MARKER = "\n<|im_end|>\n<|im_start|>assistant\n"
@@ -52,6 +54,28 @@ def parse_hidden_dims(hidden_dims_arg: str) -> tuple[int, ...]:
 def format_hidden_dims(hidden_dims: tuple[int, ...]) -> str:
     """Format hidden dims for logs and metadata."""
     return ",".join(str(width) for width in hidden_dims)
+
+
+def summarize_fold_results(fold_results: list[dict]) -> dict[str, float]:
+    """Compute cross-fold mean metrics for leaderboard reporting."""
+    metric_keys = [
+        "baseline_accuracy",
+        "baseline_f1",
+        "train_accuracy",
+        "train_f1",
+        "train_auroc",
+        "val_accuracy",
+        "val_f1",
+        "val_auroc",
+        "test_accuracy",
+        "test_f1",
+        "test_auroc",
+    ]
+    summary: dict[str, float] = {}
+    for key in metric_keys:
+        values = [fold.get(key, float("nan")) for fold in fold_results]
+        summary[f"mean_{key}"] = float(np.nanmean(values))
+    return summary
 
 
 def get_icr_model_and_tokenizer(
@@ -93,18 +117,14 @@ def _combine_prompt_and_response(
     response_ids: list[int],
     max_length: int,
 ) -> tuple[list[int], int, int]:
-    """Assemble a sequence while preserving the response tail."""
+    """Assemble a sequence without truncation."""
+    del max_length
+
     if not response_ids:
         raise ValueError("Encountered an empty tokenized response.")
 
-    if len(response_ids) >= max_length:
-        kept_response = response_ids[-max_length:]
-        return kept_response, 0, len(kept_response)
-
-    prompt_budget = max_length - len(response_ids)
-    kept_prompt = prompt_ids[-prompt_budget:] if prompt_budget > 0 else []
-    input_ids = kept_prompt + response_ids
-    response_start = len(kept_prompt)
+    input_ids = prompt_ids + response_ids
+    response_start = len(prompt_ids)
     response_end = len(input_ids)
     return input_ids, response_start, response_end
 
@@ -314,6 +334,7 @@ def extract_icr_feature_cache(
         "top_k": np.asarray([top_k], dtype=np.int32),
         "z_normalize": np.asarray([int(z_normalize)], dtype=np.int8),
         "max_length": np.asarray([max_length], dtype=np.int32),
+        "truncation_disabled": np.asarray([1], dtype=np.int8),
     }
 
     for start in tqdm(range(0, n_samples, batch_size), desc="Caching Method 2 ICR", unit="batch"):
@@ -402,8 +423,10 @@ def load_or_build_cache(
         labels_match = "labels" in cache and len(cache["labels"]) == len(df)
         top_k_match = int(cache.get("top_k", np.asarray([-1], dtype=np.int32))[0]) == top_k
         z_norm_match = int(cache.get("z_normalize", np.asarray([-1], dtype=np.int8))[0]) == int(z_normalize)
-        max_length_match = int(cache.get("max_length", np.asarray([-1], dtype=np.int32))[0]) == max_length
-        if not (labels_match and top_k_match and z_norm_match and max_length_match):
+        truncation_disabled_match = (
+            int(cache.get("truncation_disabled", np.asarray([0], dtype=np.int8))[0]) == 1
+        )
+        if not (labels_match and top_k_match and z_norm_match and truncation_disabled_match):
             print("[Method 2] Cache metadata mismatch detected. Rebuilding cache.")
             should_rebuild_cache = True
 

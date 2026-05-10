@@ -6,6 +6,7 @@ the SMILES task setup:
 - base model: `Qwen/Qwen2.5-0.5B`
 - data source: `data/dataset.csv`
 - label space: `0 = truthful`, `1 = hallucinated`
+- sequence handling: full tokenized `prompt + response`, with truncation disabled
 
 ## What is reproduced from `./SAPLMA`
 
@@ -77,6 +78,12 @@ Full run:
 python method1_saplma/run_method1.py --layers auto --auto-top-k 1
 ```
 
+Logistic-regression baseline:
+
+```bash
+python method1_saplma/run_method1.py --classifier logistic --layers auto --auto-top-k 1
+```
+
 Regularized variants:
 
 ```bash
@@ -117,6 +124,19 @@ The ablation runner evaluates the requested grid:
 
 That gives `12` configurations in total. The best one is selected by **mean validation AUROC**, not by test AUROC.
 
+Binary-classifier ablation sweep:
+
+```bash
+python method1_saplma/run_binary_ablation.py --layers auto --auto-top-k 1
+```
+
+This runner compares exactly three classifier configurations on the same SAPLMA
+features:
+
+- logistic regression
+- 2-hidden-layer MLP with `dropout=0.3` and `L2`
+- 2-hidden-layer MLP with `dropout=0.3` and `L1+L2`
+
 ## Outputs
 
 Artifacts are written to:
@@ -128,3 +148,13 @@ Artifacts are written to:
 - `method1_saplma/artifacts/ablation/ablation_results.json`
 - `method1_saplma/artifacts/ablation/best_config.json`
 - `method1_saplma/artifacts/ablation/best_results.json`
+
+## Colab Notebook
+
+Use:
+
+- `method1_saplma/SAPLMA_Binary_Ablation_Colab.ipynb`
+
+That notebook syncs the repo into a Drive-backed Colab workspace, installs the
+project dependencies, runs `run_binary_ablation.py`, and displays the
+leaderboard plus the selected best configuration.

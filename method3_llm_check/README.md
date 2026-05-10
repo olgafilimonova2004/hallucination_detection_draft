@@ -7,7 +7,7 @@ feature families implemented in
 The implementation keeps the SMILES project adaptation:
 
 - base model: `Qwen/Qwen2.5-0.5B`
-- response-preserving truncation
+- full tokenized `prompt + response`, with truncation disabled
 - evaluation on `data/dataset.csv` only
 - 5-fold CV with the repo's `splitting.py`
 
@@ -166,7 +166,6 @@ PYTHONPATH=/root/methodologist/.venv/lib/python3.12/site-packages \
 python3 method3_llm_check/run_ablation.py \
   --subset 40 \
   --batch-size 1 \
-  --max-length 256 \
   --cache-dtype float32 \
   --output-dir method3_llm_check/artifacts/ablation_smoke
 ```
@@ -203,4 +202,3 @@ The shared cache now stores:
 - `response_truncated`
 - `max_length`
 - `labels`
-

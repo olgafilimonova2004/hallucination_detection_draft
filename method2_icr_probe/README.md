@@ -21,6 +21,9 @@ adaptations required for `Qwen/Qwen2.5-0.5B`:
 The extractor does **not** save raw attentions. It computes the reduced feature
 vector on the fly and stores only the final per-sample ICR vector.
 
+The current implementation keeps the full tokenized `prompt + response`
+sequence. Truncation is disabled.
+
 The default probe now matches the paper MLP path from
 `/root/SMILES_2026/ICR_Probe_paper_repo/src/utils.py`:
 
@@ -68,9 +71,10 @@ This implementation uses that same aggregation. Each sample therefore gets one
 ICR score per transformer layer, so the feature vector length is `24`.
 
 The response span is the full preserved response token span returned by the
-tokenizer. Because the dataset responses already include `<|endoftext|>`, the
-terminal EOS token remains in the span when present, which is closer to the
-paper repo's generation-time output-token handling than stripping it out.
+tokenizer. Because truncation is disabled, this is the full response span in
+the original sample. The terminal EOS token remains in the span when present,
+which is closer to the paper repo's generation-time output-token handling than
+stripping it out.
 
 ## Important implementation detail
 
@@ -93,7 +97,6 @@ PYTHONPATH=/root/methodologist/.venv/lib/python3.12/site-packages \
 python3 method2_icr_probe/run_method2.py \
   --subset 40 \
   --batch-size 1 \
-  --max-length 256 \
   --cache-dtype float32
 ```
 
@@ -133,6 +136,21 @@ python method2_icr_probe/run_method2.py \
   --output-file method2_icr_probe/artifacts/method2_logistic.json
 ```
 
+Binary-classifier ablation sweep:
+
+```bash
+python method2_icr_probe/run_binary_ablation.py \
+  --batch-size 1 \
+  --cache-dtype float32
+```
+
+This runner compares exactly three classifier configurations on the same ICR
+feature vector:
+
+- logistic regression
+- 2-hidden-layer MLP with `dropout=0.3` and `L2`
+- 2-hidden-layer MLP with `dropout=0.3` and `L1+L2`
+
 ## Outputs
 
 Artifacts are written to:
@@ -150,3 +168,13 @@ The cached `.npz` file contains:
 - `z_normalize`
 - `max_length`
 - `labels`
+
+## Colab Notebook
+
+Use:
+
+- `method2_icr_probe/ICR_Binary_Ablation_Colab.ipynb`
+
+That notebook syncs the repo into a Drive-backed Colab workspace, installs the
+project dependencies, runs `run_binary_ablation.py`, and displays the
+leaderboard plus the selected best configuration.

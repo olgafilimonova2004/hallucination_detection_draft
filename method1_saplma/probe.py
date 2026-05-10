@@ -15,7 +15,9 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score
+from sklearn.preprocessing import StandardScaler
 
 
 class SAPLMAProbe(nn.Module):
@@ -141,4 +143,63 @@ class SAPLMAProbe(nn.Module):
             logits = self(X_t)
             prob_pos = torch.sigmoid(logits).detach().cpu().numpy()
 
+        return np.stack([1.0 - prob_pos, prob_pos], axis=1)
+
+
+class SAPLMALogisticProbe(nn.Module):
+    """Scaled logistic-regression baseline over SAPLMA hidden-state features."""
+
+    def __init__(
+        self,
+        c: float = 1.0,
+        max_iter: int = 1000,
+        random_state: int = 42,
+    ) -> None:
+        super().__init__()
+        self.c = c
+        self.max_iter = max_iter
+        self.random_state = random_state
+        self._threshold: float = 0.5
+        self._scaler = StandardScaler()
+        self._classifier: LogisticRegression | None = None
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "SAPLMALogisticProbe":
+        X_arr = np.asarray(X, dtype=np.float32)
+        y_arr = np.asarray(y, dtype=int)
+        X_scaled = self._scaler.fit_transform(X_arr)
+        self._classifier = LogisticRegression(
+            C=self.c,
+            class_weight="balanced",
+            max_iter=self.max_iter,
+            random_state=self.random_state,
+            solver="liblinear",
+        )
+        self._classifier.fit(X_scaled, y_arr)
+        return self
+
+    def fit_hyperparameters(self, X_val: np.ndarray, y_val: np.ndarray) -> "SAPLMALogisticProbe":
+        probs = self.predict_proba(X_val)[:, 1]
+        candidates = np.unique(np.concatenate([probs, np.linspace(0.0, 1.0, 101)]))
+
+        best_threshold = 0.5
+        best_f1 = -1.0
+        for threshold in candidates:
+            y_pred = (probs >= threshold).astype(int)
+            score = f1_score(y_val, y_pred, zero_division=0)
+            if score > best_f1:
+                best_f1 = score
+                best_threshold = float(threshold)
+
+        self._threshold = best_threshold
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return (self.predict_proba(X)[:, 1] >= self._threshold).astype(int)
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        if self._classifier is None:
+            raise RuntimeError("Probe has not been fitted yet. Call fit() first.")
+        X_arr = np.asarray(X, dtype=np.float32)
+        X_scaled = self._scaler.transform(X_arr)
+        prob_pos = self._classifier.predict_proba(X_scaled)[:, 1]
         return np.stack([1.0 - prob_pos, prob_pos], axis=1)

@@ -43,7 +43,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-file", default=str(DEFAULT_CACHE_FILE))
     parser.add_argument("--output-file", default=str(DEFAULT_OUTPUT_FILE))
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
-    parser.add_argument("--max-length", type=int, default=512)
+    parser.add_argument(
+        "--max-length",
+        type=int,
+        default=512,
+        help="Deprecated compatibility flag. Truncation is disabled and the full prompt+response is used.",
+    )
     parser.add_argument("--cache-dtype", choices=("float16", "float32"), default="float32")
     parser.add_argument(
         "--feature-set",
@@ -133,7 +138,7 @@ def main() -> None:
         "data_file": str(data_file),
         "subset": args.subset,
         "batch_size": args.batch_size,
-        "max_length": args.max_length,
+        "max_length_requested": args.max_length,
         "cache_dtype": args.cache_dtype,
         "classifier": args.classifier,
         "logistic_c": args.logistic_c,
@@ -146,6 +151,7 @@ def main() -> None:
         "l2_weight_decay": args.l2_weight_decay,
         "feature_dim": int(X.shape[1]),
         "response_span": feature_metadata["response_span"],
+        "truncation": "disabled",
         "logit_metric_names": cache["logit_metric_names"].tolist(),
         "selected_hidden_state_indices_hf": cache["selected_hidden_state_indices_hf"].astype(int).tolist(),
         "selected_hidden_transformer_layers_zero_based": cache[

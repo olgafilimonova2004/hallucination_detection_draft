@@ -16,11 +16,13 @@ DEFAULT_CACHE_FILE = ROOT / "method1_saplma" / "artifacts" / "cache" / "method1_
 DEFAULT_OUTPUT_FILE = ROOT / "method1_saplma" / "artifacts" / "method1_results.json"
 DEFAULT_LAYER_RANKINGS = ROOT.parent / "layer_rankings.csv"
 DEFAULT_ABLATION_DIR = ROOT / "method1_saplma" / "artifacts" / "ablation"
+DEFAULT_BINARY_ABLATION_DIR = ROOT / "method1_saplma" / "artifacts" / "binary_ablation"
 DEFAULT_AUTO_LAYER = 15
 DEFAULT_ARCHITECTURES = ((256, 128, 64), (256, 128), (256,))
 DEFAULT_ABLATION_DROPOUT_P = 0.3
 DEFAULT_ABLATION_L1 = 1e-5
 DEFAULT_ABLATION_L2 = 1e-4
+DEFAULT_BINARY_MLP_HIDDEN_DIMS = (256, 128)
 
 
 def maybe_take_subset(df: pd.DataFrame, subset_size: int | None) -> pd.DataFrame:
@@ -118,7 +120,11 @@ def load_or_build_cache(
     if not should_rebuild_cache:
         print(f"[Method 1] Loading cache from {cache_file}")
         cache = load_feature_cache(cache_file)
-        if "labels" not in cache or len(cache["labels"]) != len(df):
+        if (
+            "labels" not in cache
+            or len(cache["labels"]) != len(df)
+            or int(cache.get("truncation_disabled", np.asarray([0], dtype=np.int8))[0]) != 1
+        ):
             print("[Method 1] Cache shape mismatch detected. Rebuilding cache.")
             should_rebuild_cache = True
 

@@ -37,7 +37,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-file", default=str(DEFAULT_CACHE_FILE))
     parser.add_argument("--output-file", default=str(DEFAULT_OUTPUT_FILE))
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
-    parser.add_argument("--max-length", type=int, default=512)
+    parser.add_argument(
+        "--max-length",
+        type=int,
+        default=512,
+        help="Deprecated compatibility flag. Truncation is disabled and the full prompt+response is used.",
+    )
     parser.add_argument("--cache-dtype", choices=("float16", "float32"), default="float32")
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     parser.add_argument(
@@ -128,7 +133,7 @@ def main() -> None:
         "data_file": str(data_file),
         "subset": args.subset,
         "batch_size": args.batch_size,
-        "max_length": args.max_length,
+        "max_length_requested": args.max_length,
         "cache_dtype": args.cache_dtype,
         "top_k": args.top_k,
         "z_normalize": z_normalize,
@@ -155,7 +160,8 @@ def main() -> None:
         "attention_pooling": "mean_all_heads",
         "use_induction_head": False,
         "token_aggregation": "mean_over_response_tokens_per_layer",
-        "response_span": "full_response_tokens_preserved_by_truncation",
+        "response_span": "full_response_tokens_no_truncation",
+        "truncation": "disabled",
     }
     metadata_file = output_file.with_name(output_file.stem + "_metadata.json")
     metadata_file.write_text(json.dumps(metadata, indent=2))
